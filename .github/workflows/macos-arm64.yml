@@ -65,10 +65,44 @@ jobs:
       - name: Build
         run: bash .github/scripts/package-macos-arm64.sh
 
-      - name: Verify arm64 linkage and smoke-test
+      - name: Verify arm64 linkage, signature, and smoke-test
         run: |
           set -o pipefail
-          bash .github/scripts/verify-macos-arm64-bundle.sh dist/Avidemux.app | tee dist/verify.log
+          dmg=$(echo dist/*.dmg)
+          bash .github/scripts/verify-macos-arm64-bundle.sh dist/Avidemux.app "${dmg}" | tee dist/verify.log
+          shasum -a 256 dist/*.dmg dist/*.zip | tee dist/SHA256SUMS
+          python3 - dist/SHA256SUMS dist/RELEASE_NOTES.md << 'PY'
+          import os, sys
+          sums = open(sys.argv[1], encoding="utf-8").read().strip()
+          notes = """Unofficial native Apple Silicon (arm64) build of Avidemux from the [jw-tecuri/avidemux2](https://github.com/jw-tecuri/avidemux2) fork. This is not an official Avidemux release, and it is not notarized with an Apple Developer certificate.
+
+          The app is ad-hoc signed (`codesign --sign -`). Gatekeeper will block a normal double-click the first time you open it.
+
+          **Open it the first time**
+
+          1. Copy `Avidemux.app` out of the disk image into `/Applications` (or any folder outside the DMG). The zip contains the same app.
+          2. Right-click the app and choose **Open**, then confirm **Open**.
+          3. If macOS still blocks it: System Settings → Privacy & Security → **Open Anyway**.
+
+          After that first approval, the app opens with a normal double-click.
+
+          The main executable and bundled libraries are arm64. Qt frameworks keep `Versions/Current` and the top-level binary, Resources, and Headers symlinks. `codesign --verify --deep --strict` passes on the app before packaging and on the copy inside the disk image. The app does not need Homebrew installed.
+
+          **SHA-256**
+
+          ```
+          %s
+          ```
+
+          Commit: %s
+          Workflow: %s
+          """ % (
+              sums,
+              os.environ.get("GITHUB_SHA", ""),
+              os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+          )
+          open(sys.argv[2], "w", encoding="utf-8").write(notes)
+          PY
 
       - name: Upload package
         uses: actions/upload-artifact@v4
@@ -77,6 +111,7 @@ jobs:
           path: |
             dist/*.dmg
             dist/*.zip
+            dist/SHA256SUMS
             dist/verify.log
           if-no-files-found: error
           retention-days: 14
@@ -89,25 +124,10 @@ jobs:
           name: Avidemux ${{ github.event_name == 'push' && github.ref_name || inputs.tag }} (unofficial macOS arm64)
           prerelease: true
           fail_on_unmatched_files: true
+          body_path: dist/RELEASE_NOTES.md
           files: |
             dist/*.dmg
             dist/*.zip
-          body: |
-            Unofficial native Apple Silicon (arm64) build of Avidemux from the [jw-tecuri/avidemux2](https://github.com/jw-tecuri/avidemux2) fork. This is not an official Avidemux release, and it is not notarized with an Apple Developer certificate.
-
-            The app is ad-hoc signed (`codesign -s -`). Gatekeeper will block a normal double-click the first time you open it.
-
-            **Open it the first time**
-
-            1. Copy `Avidemux.app` out of the disk image into `/Applications` (or any folder outside the DMG). The zip contains the same app.
-            2. Right-click the app and choose **Open**, then confirm **Open**.
-            3. If macOS still blocks it: System Settings → Privacy & Security → **Open Anyway**.
-
-            After that first approval, the app opens with a normal double-click.
-
-            The main executable and bundled libraries are arm64. Qt and the other libraries are inside the app bundle; it does not need Homebrew installed.
-
-            Commit: ${{ github.sha }}
-            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

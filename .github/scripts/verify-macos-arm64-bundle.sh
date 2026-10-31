@@ -160,6 +160,74 @@ if ! printf '%s\n' "$gui_out" | grep -q 'Avidemux v'; then
     fail=1
 fi
 
+check_layout_and_signature() {
+    local bundle="$1"
+    local label="$2"
+    note ""
+    note "=== ${label}: dangling symlinks ==="
+    local dangling
+    dangling=$(find "${bundle}" -type l ! -exec test -e {} \; -print || true)
+    if [ -n "${dangling}" ]; then
+        note "ERROR: dangling symlinks in ${bundle}"
+        printf '%s\n' "${dangling}"
+        fail=1
+    else
+        note "no dangling symlinks"
+    fi
+
+    note ""
+    note "=== ${label}: owner-writable files ==="
+    local readonly_files
+    readonly_files=$(find "${bundle}" \( -type f -o -type d \) ! -perm -u+w -print || true)
+    if [ -n "${readonly_files}" ]; then
+        note "ERROR: files or directories without owner write permission"
+        printf '%s\n' "${readonly_files}"
+        fail=1
+    else
+        note "files and directories are owner-writable"
+    fi
+
+    note ""
+    note "=== ${label}: codesign --verify --deep --strict --verbose=2 ==="
+    set +e
+    codesign_out=$(/usr/bin/codesign --verify --deep --strict --verbose=2 "${bundle}" 2>&1)
+    codesign_status=$?
+    set -e
+    printf '%s\n' "${codesign_out}"
+    if [ "${codesign_status}" -ne 0 ]; then
+        note "ERROR: codesign verify exited ${codesign_status}"
+        fail=1
+    else
+        note "codesign verify passed"
+    fi
+}
+
+check_layout_and_signature "${APP}" "app before DMG"
+
+DMG="${2:-}"
+if [ -n "${DMG}" ]; then
+    if [ ! -f "${DMG}" ]; then
+        note "ERROR: DMG not found: ${DMG}"
+        exit 1
+    fi
+    DMG="$(cd "$(dirname "${DMG}")" && pwd)/$(basename "${DMG}")"
+    mnt=$(mktemp -d /tmp/avidemux-dmg.XXXXXX)
+    cleanup_mnt() {
+        hdiutil detach "${mnt}" >/dev/null 2>&1 || true
+        rmdir "${mnt}" 2>/dev/null || true
+    }
+    trap cleanup_mnt EXIT
+    hdiutil attach -readonly -nobrowse -mountpoint "${mnt}" "${DMG}"
+    dmg_app=$(find "${mnt}" -maxdepth 3 -type d -name '*.app' | head -n 1)
+    if [ -z "${dmg_app}" ]; then
+        note "ERROR: no .app inside ${DMG}"
+        exit 1
+    fi
+    check_layout_and_signature "${dmg_app}" "app mounted from DMG"
+    trap - EXIT
+    cleanup_mnt
+fi
+
 note ""
 if [ "$fail" -ne 0 ]; then
     note "VERIFICATION FAILED"
