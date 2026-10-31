@@ -1,0 +1,140 @@
+# Unofficial native Apple Silicon build of Avidemux.
+#
+# On the default branch this workflow:
+# - builds on every push to master and uploads the package as an artifact
+#   (no GitHub Release)
+# - builds and publishes a Release when a tag matching v*-macos-arm64 is pushed
+# - builds on workflow_dispatch, and publishes only when publish=true
+#
+# A tag that contains "-test" stays a pre-release. Any other v*-macos-arm64 tag
+# is a normal release and is marked latest. Older test tags (v2.8.2-arm64-test1
+# and test2) do not match this tag filter, so they are left unchanged.
+#
+# Pull requests that touch the workflow or the macOS build scripts also build.
+
+name: macOS arm64
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a GitHub Release with the package
+        type: boolean
+        default: false
+      tag:
+        description: Release tag when publishing a manual run (for example v2.8.2-macos-arm64)
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/macos-arm64.yml"
+      - ".github/scripts/**"
+      - "bootStrapMacOS_Monterey.arm64.sh"
+      - "bootStrapMacOS_*.sh"
+      - "avidemux/osxInstaller/**"
+      - "avidemux_core/cmake/ffmpeg_make.sh.cmake"
+      - "macos_brew_setup.txt"
+  push:
+    branches:
+      - master
+    tags:
+      - "v*-macos-arm64"
+
+concurrency:
+  group: macos-arm64-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build arm64 DMG
+    runs-on: macos-26
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-avidemux-macos-arm64-${{ hashFiles('avidemux_core/**', 'avidemux/**', 'avidemux_plugins/**', 'bootStrapMacOS_Monterey.arm64.sh') }}
+          restore-keys: |
+            ccache-avidemux-macos-arm64-
+
+      - name: Build
+        run: bash .github/scripts/package-macos-arm64.sh
+
+      - name: Verify arm64 linkage, signature, and smoke-test
+        run: |
+          set -o pipefail
+          dmg=$(echo dist/*.dmg)
+          bash .github/scripts/verify-macos-arm64-bundle.sh dist/Avidemux.app "${dmg}" | tee dist/verify.log
+          shasum -a 256 dist/*.dmg dist/*.zip | sed 's| dist/| |' | tee dist/SHA256SUMS
+          python3 - dist/SHA256SUMS dist/macos-minos.txt dist/RELEASE_NOTES.md << 'PY'
+          import os, sys
+          sums = open(sys.argv[1], encoding="utf-8").read().strip()
+          sums = sums.replace("dist/", "")
+          minos = "26.5"
+          if os.path.exists(sys.argv[2]):
+              recorded = open(sys.argv[2], encoding="utf-8").read().strip()
+              if recorded:
+                  minos = recorded
+          notes = """Unofficial native arm64 build of upstream Avidemux 2.8.2 from the jw-tecuri fork.
+
+          The app is ad-hoc signed and not notarized. The first time you open it, right-click the app and choose Open, or remove the quarantine attribute (`xattr -dr com.apple.quarantine Avidemux.app`).
+
+          Requires macOS %s or later.
+
+          Verification: every Mach-O in the bundle is arm64, nothing links Homebrew or other non-bundled paths, and `codesign --verify --deep --strict` passes on the app before packaging and on the copy inside the disk image.
+
+          **SHA-256**
+
+          ```
+          %s
+          ```
+
+          Commit: %s
+          Workflow: %s
+          """ % (
+              minos,
+              sums,
+              os.environ.get("GITHUB_SHA", ""),
+              os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"] + "/actions/runs/" + os.environ["GITHUB_RUN_ID"],
+          )
+          open(sys.argv[3], "w", encoding="utf-8").write(notes)
+          PY
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Avidemux-macos-arm64
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/verify.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: ${{ (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+          name: ${{ contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-test') && format('Avidemux {0}', github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name) || 'Avidemux 2.8.2 for macOS (Apple Silicon)' }}
+          prerelease: ${{ contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-test') }}
+          make_latest: ${{ contains(github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name, '-test') && 'false' || 'true' }}
+          fail_on_unmatched_files: true
+          body_path: dist/RELEASE_NOTES.md
+          files: |
+            dist/*.dmg
+            dist/*.zip
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
