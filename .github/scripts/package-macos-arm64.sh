@@ -1,8 +1,9 @@
 #!/bin/bash
 # Build a native arm64 Avidemux.app and DMG on a GitHub-hosted macOS runner.
 # The Avidemux bootstrap refuses a case-insensitive volume, and the runner's
-# disk is case-insensitive APFS, so the tree is copied onto a case-sensitive
-# APFS volume that shares the container's free space.
+# system disk is case-insensitive APFS. A new APFS volume in the boot container
+# cannot be mounted on GitHub-hosted runners (diskutil error -69842), so the
+# tree is copied onto a case-sensitive APFS disk image.
 set -euo pipefail
 
 ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
@@ -33,29 +34,44 @@ brew install \
     sdl3 libass freetype fribidi fontconfig \
     libogg libvorbis opus libopusenc lame two-lame \
     aom libvpx x264 x265 xvid \
-    faad2 fdk-aac a52dec
+    faad2 a52dec
 
 # faac is optional (often unbottled). Skip it if the formula will not install.
 if ! brew install faac; then
     echo "WARNING: faac failed to install; the FAAC encoder plugin will be omitted."
 fi
 
-# lrelease ships in qttools. The i18n build looks for it next to qmake.
-if [ ! -x "$HOMEBREW_PREFIX/opt/qtbase/bin/lrelease" ] && [ -x "$HOMEBREW_PREFIX/opt/qttools/bin/lrelease" ]; then
-    ln -sfn "$HOMEBREW_PREFIX/opt/qttools/bin/lrelease" "$HOMEBREW_PREFIX/opt/qtbase/bin/lrelease"
+# qtbase is keg-only. Its qmake still reports QT_INSTALL_PREFIX as the Homebrew
+# prefix, so the build only works once those files are linked into /opt/homebrew.
+# The bootstrap also looks for /opt/homebrew/opt/qt (the old formula name).
+brew link --force qtbase
+brew link --force qttools || true
+if [ ! -e "$HOMEBREW_PREFIX/opt/qt" ]; then
+    ln -sfn qtbase "$HOMEBREW_PREFIX/opt/qt"
 fi
-
-if [ -x "$HOMEBREW_PREFIX/opt/qt/bin/qmake" ]; then
-    unset MYQT || true
-elif [ -x "$HOMEBREW_PREFIX/opt/qtbase/bin/qmake" ]; then
-    export MYQT="$HOMEBREW_PREFIX/opt/qtbase"
-else
-    echo "ERROR: Qt6 qmake not found after brew install" >&2
+# lrelease ships in qttools. The i18n build looks for it next to qmake.
+if [ ! -x "$HOMEBREW_PREFIX/opt/qt/bin/lrelease" ] && [ -x "$HOMEBREW_PREFIX/opt/qttools/bin/lrelease" ]; then
+    ln -sfn "$HOMEBREW_PREFIX/opt/qttools/bin/lrelease" "$HOMEBREW_PREFIX/opt/qt/bin/lrelease"
+fi
+plugins_dir=$("$HOMEBREW_PREFIX/bin/qmake" -query QT_INSTALL_PLUGINS)
+if [ ! -d "$plugins_dir/platforms" ]; then
+    keg_plugins="$HOMEBREW_PREFIX/opt/qtbase/share/qt/plugins"
+    if [ -d "$keg_plugins/platforms" ]; then
+        mkdir -p "$HOMEBREW_PREFIX/share/qt"
+        ln -sfn "$keg_plugins" "$HOMEBREW_PREFIX/share/qt/plugins"
+    fi
+fi
+plugins_dir=$("$HOMEBREW_PREFIX/bin/qmake" -query QT_INSTALL_PLUGINS)
+if [ ! -d "$plugins_dir/platforms" ]; then
+    echo "ERROR: Qt platform plugins not found at $plugins_dir/platforms" >&2
+    "$HOMEBREW_PREFIX/bin/qmake" -query || true
     exit 1
 fi
-echo "MYQT=${MYQT:-<linked qt formula>}"
-qmake_bin="${MYQT:-$HOMEBREW_PREFIX/opt/qt}/bin/qmake"
-"$qmake_bin" -query
+# A linked /opt/homebrew/bin/qmake must not be combined with MYQT; the
+# bootstrap treats that combination as a conflicting Qt install.
+unset MYQT || true
+echo "Using linked Homebrew Qt at $HOMEBREW_PREFIX"
+"$HOMEBREW_PREFIX/bin/qmake" -query
 
 echo "=== translations submodule (mean00/avidemux2_i18n) ==="
 # This fork does not have jw-tecuri/avidemux2_i18n. The gitlink is relative
@@ -65,30 +81,22 @@ git config submodule.i18n.url https://github.com/mean00/avidemux2_i18n.git
 git submodule update --init avidemux/qt4/i18n
 test -f avidemux/qt4/i18n/CMakeLists.txt
 
-echo "=== case-sensitive APFS volume ==="
-diskutil info / || true
-container=$(diskutil info -plist / | plutil -extract APFSContainerReference raw -o - - 2>/dev/null || true)
-if [ -z "$container" ]; then
-    container=$(diskutil info / | awk -F': +' '/APFS Container/ {print $2; exit}' | awk '{print $1}')
+echo "=== case-sensitive APFS disk image ==="
+# GitHub-hosted runners reject `diskutil apfs addVolume` with error -69842
+# ("Couldn't mount disk"). A sparse disk image is writable by the runner user.
+image="/tmp/AvidemuxCS.sparseimage"
+rm -f "$image"
+hdiutil create -size 40g -type SPARSE -fs "Case-sensitive APFS" -volname AvidemuxCS "$image"
+sudo mkdir -p /Volumes/AvidemuxCS
+sudo chown "$(id -un):$(id -gn)" /Volumes/AvidemuxCS
+if ! hdiutil attach "$image" -nobrowse -mountpoint /Volumes/AvidemuxCS; then
+    sudo hdiutil attach "$image" -nobrowse -mountpoint /Volumes/AvidemuxCS
+    sudo chown "$(id -un):$(id -gn)" /Volumes/AvidemuxCS
 fi
-if [ -z "$container" ]; then
-    echo "ERROR: could not determine the APFS container for /" >&2
-    diskutil list || true
-    exit 1
-fi
-echo "APFS container: $container"
-if [ ! -d /Volumes/AvidemuxCS ]; then
-    sudo diskutil apfs addVolume "$container" APFSX AvidemuxCS -mountpoint /Volumes/AvidemuxCS
-fi
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-    [ -d /Volumes/AvidemuxCS ] && break
-    sleep 1
-done
 if [ ! -d /Volumes/AvidemuxCS ]; then
     echo "ERROR: /Volumes/AvidemuxCS did not mount" >&2
     exit 1
 fi
-sudo chown "$(id -un):$(id -gn)" /Volumes/AvidemuxCS
 
 echo "=== copy sources ==="
 mkdir -p /Volumes/AvidemuxCS/src
@@ -103,7 +111,7 @@ isCaseSensitive || { echo "ERROR: /Volumes/AvidemuxCS is not case-sensitive" >&2
 
 export PATH="$HOMEBREW_PREFIX/opt/ccache/libexec:$HOMEBREW_PREFIX/bin:$PATH"
 export PKG_CONFIG_PATH="$HOMEBREW_PREFIX/lib/pkgconfig:$HOMEBREW_PREFIX/share/pkgconfig:$HOMEBREW_PREFIX/opt/gettext/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-export CMAKE_PREFIX_PATH="$HOMEBREW_PREFIX/opt/gettext${MYQT:+:$MYQT}:$HOMEBREW_PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
+export CMAKE_PREFIX_PATH="$HOMEBREW_PREFIX/opt/qtbase:$HOMEBREW_PREFIX/opt/qttools:$HOMEBREW_PREFIX/opt/gettext:$HOMEBREW_PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}"
 export CPATH="$HOMEBREW_PREFIX/include${CPATH:+:$CPATH}"
 export LIBRARY_PATH="$HOMEBREW_PREFIX/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
 export CPPFLAGS="-I$HOMEBREW_PREFIX/include ${CPPFLAGS:-}"
