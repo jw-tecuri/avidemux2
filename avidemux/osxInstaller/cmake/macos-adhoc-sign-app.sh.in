@@ -181,17 +181,63 @@ for root, dirs, files in os.walk(app):
             continue
         machos.append(path)
 
+# Presets, tinyPy scripts, and shaders live inside the bundle and codesign
+# treats them as nested code. Sign every one of them before the app.
+extra_roots = [
+    os.path.join(app, "Contents", "MacOS", "ADM_plugins6"),
+]
+extra = []
+for root in extra_roots:
+    if not os.path.isdir(root):
+        continue
+    for dirpath, dirnames, filenames in os.walk(root):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path) or is_macho(path):
+                continue
+            if name.endswith((".json", ".py", ".shader")):
+                extra.append(path)
+
 machos.sort(key=lambda p: p.count(os.sep), reverse=True)
 frameworks.sort(key=lambda p: p.count(os.sep), reverse=True)
+extra.sort(key=lambda p: p.count(os.sep), reverse=True)
 
-for path in machos:
+for path in machos + extra:
     sign(path)
 for path in frameworks:
     sign(path)
-sign(app)
+
+
+def sign_bundle(bundle):
+    """Sign bundle, sealing any nested item codesign reports as unsigned."""
+    cmd = ["/usr/bin/codesign", "--force", "--sign", "-", "--timestamp=none", bundle]
+    for _ in range(300):
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        err = (proc.stderr or "") + (proc.stdout or "")
+        if proc.returncode == 0:
+            if err.strip():
+                print(err, end="" if err.endswith("\n") else "\n")
+            return
+        print(err, end="" if err.endswith("\n") else "\n", file=sys.stderr)
+        marker = "In subcomponent: "
+        sub = ""
+        for line in err.splitlines():
+            if marker in line:
+                sub = line.split(marker, 1)[1].strip()
+        if not sub or not os.path.exists(sub):
+            raise SystemExit(proc.returncode)
+        sign(sub)
+    raise SystemExit("too many unsigned nested items while signing %s" % bundle)
+
+
+sign_bundle(app)
 
 verify = ["/usr/bin/codesign", "--verify", "--deep", "--strict", "--verbose=2", app]
-if subprocess.call(verify) != 0:
+proc = subprocess.run(verify, capture_output=True, text=True)
+out = (proc.stderr or "") + (proc.stdout or "")
+if out.strip():
+    print(out, end="" if out.endswith("\n") else "\n")
+if proc.returncode != 0:
     print("Strict verify failed after inside-out signing; retrying with --deep", file=sys.stderr)
     subprocess.check_call(
         ["/usr/bin/codesign", "--force", "--deep", "--sign", "-", "--timestamp=none", app]
