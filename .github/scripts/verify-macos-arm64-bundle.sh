@@ -41,7 +41,12 @@ note "Main executable: $main_bin"
 note "lipo -archs: $(lipo -archs "$main_bin" 2>/dev/null || echo '<lipo failed>')"
 if command -v vtool >/dev/null 2>&1; then
     note "vtool -show-build:"
-    vtool -show-build "$main_bin" 2>/dev/null || true
+    vtool -show-build "$main_bin" 2>/dev/null | tee /tmp/avidemux-vtool.txt || true
+    minos=$(awk '/minos / { print $2; exit }' /tmp/avidemux-vtool.txt)
+    if [ -n "${minos}" ]; then
+        note "minimum macOS: ${minos}"
+        echo "${minos}" > "$(dirname "$APP")/macos-minos.txt"
+    fi
 fi
 note ""
 note "otool -L (main executable):"
