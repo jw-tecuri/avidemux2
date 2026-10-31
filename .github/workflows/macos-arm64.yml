@@ -1,0 +1,113 @@
+# Unofficial native Apple Silicon build of Avidemux.
+#
+# Produces a self-contained, ad-hoc-signed Avidemux.app inside a DMG (and a zip)
+# on a GitHub-hosted arm64 macOS runner. Pull requests that touch the workflow
+# or the macOS build scripts build and upload the package as an artifact.
+# Pushing a tag that matches v* (or a manual run with publish=true) also creates
+# a GitHub Release on this fork and attaches the package.
+#
+# GitHub Actions are disabled on some forks until an admin enables them
+# (Settings → Actions, or the Actions tab). This workflow cannot turn that on.
+
+name: macOS arm64
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a GitHub Release with the package
+        type: boolean
+        default: false
+      tag:
+        description: Release tag to create when publishing a manual run (for example v2.8.2-arm64-test1)
+        type: string
+        default: ""
+  pull_request:
+    paths:
+      - ".github/workflows/macos-arm64.yml"
+      - ".github/scripts/**"
+      - "bootStrapMacOS_Monterey.arm64.sh"
+      - "bootStrapMacOS_*.sh"
+      - "avidemux/osxInstaller/**"
+      - "avidemux_core/cmake/ffmpeg_make.sh.cmake"
+      - "macos_brew_setup.txt"
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: macos-arm64-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build arm64 DMG
+    runs-on: macos-26
+    timeout-minutes: 300
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+          fetch-depth: 1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-avidemux-macos-arm64-${{ hashFiles('avidemux_core/**', 'avidemux/**', 'avidemux_plugins/**', 'bootStrapMacOS_Monterey.arm64.sh') }}
+          restore-keys: |
+            ccache-avidemux-macos-arm64-
+
+      - name: Build
+        run: bash .github/scripts/package-macos-arm64.sh
+
+      - name: Verify arm64 linkage and smoke-test
+        run: |
+          set -o pipefail
+          bash .github/scripts/verify-macos-arm64-bundle.sh dist/Avidemux.app | tee dist/verify.log
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: Avidemux-macos-arm64
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/verify.log
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || inputs.tag }}
+          name: Avidemux ${{ github.event_name == 'push' && github.ref_name || inputs.tag }} (unofficial macOS arm64)
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.dmg
+            dist/*.zip
+          body: |
+            Unofficial native Apple Silicon (arm64) build of Avidemux from the [jw-tecuri/avidemux2](https://github.com/jw-tecuri/avidemux2) fork. This is not an official Avidemux release, and it is not notarized with an Apple Developer certificate.
+
+            The app is ad-hoc signed (`codesign -s -`). Gatekeeper will block a normal double-click the first time you open it.
+
+            **Open it the first time**
+
+            1. Copy `Avidemux.app` out of the disk image into `/Applications` (or any folder outside the DMG). The zip contains the same app.
+            2. Right-click the app and choose **Open**, then confirm **Open**.
+            3. If macOS still blocks it: System Settings → Privacy & Security → **Open Anyway**.
+
+            After that first approval, the app opens with a normal double-click.
+
+            The main executable and bundled libraries are arm64. Qt and the other libraries are inside the app bundle; it does not need Homebrew installed.
+
+            Commit: ${{ github.sha }}
+            Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
