@@ -92,33 +92,47 @@ if [ ! -x "$cli" ]; then
     exit 1
 fi
 
-note ""
-note "=== avidemux_cli --help ==="
-set +e
-cli_out=$(cd /tmp && "$cli" --help 2>&1)
-cli_status=$?
-set -e
-printf '%s\n' "$cli_out"
-if [ "$cli_status" -ne 0 ]; then
-    note "ERROR: avidemux_cli --help exited $cli_status"
-    fail=1
-fi
-if ! printf '%s\n' "$cli_out" | grep -q 'Avidemux v'; then
-    note "ERROR: avidemux_cli did not print an Avidemux version banner"
-    fail=1
-fi
+# On macOS, a non-tty stdout is redirected to /tmp/admlog.txt after
+# ADM_initBaseDir, so the banner is not visible on the pipe.
+run_smoke() {
+    label="$1"
+    shift
+    rm -f /tmp/admlog.txt
+    note ""
+    note "=== $label ==="
+    set +e
+    (cd /tmp && "$@" > /tmp/smoke-stdout.txt 2>&1)
+    smoke_status=$?
+    set -e
+    smoke_out="$(cat /tmp/smoke-stdout.txt /tmp/admlog.txt 2>/dev/null || true)"
+    printf '%s\n' "$smoke_out"
+    if [ "$smoke_status" -ne 0 ]; then
+        note "ERROR: $label exited $smoke_status"
+        fail=1
+    fi
+    if ! printf '%s\n' "$smoke_out" | grep -q 'Avidemux v'; then
+        note "ERROR: $label did not print an Avidemux version banner"
+        fail=1
+    fi
+}
+
+run_smoke "avidemux_cli --help" "$cli" --help
 
 gui="$main_bin"
+# Bound the GUI launch. Avidemux may ignore the timeout wrapper's signals
+# once it redirects stdio, so python enforces the limit and we still read
+# /tmp/admlog.txt afterwards.
+rm -f /tmp/admlog.txt /tmp/smoke-stdout.txt
 note ""
 note "=== GUI --help (QT_QPA_PLATFORM=offscreen) ==="
 set +e
-gui_out=$(cd /tmp && QT_QPA_PLATFORM=offscreen python3 - "$gui" <<'PY'
+QT_QPA_PLATFORM=offscreen python3 - "$gui" <<'PY'
 import os, subprocess, sys
 gui = sys.argv[1]
 env = os.environ.copy()
 env["QT_QPA_PLATFORM"] = "offscreen"
 try:
-    proc = subprocess.run([gui, "--help"], env=env, timeout=120,
+    proc = subprocess.run([gui, "--help"], cwd="/tmp", env=env, timeout=120,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 except subprocess.TimeoutExpired as exc:
     sys.stdout.write(exc.stdout or "")
@@ -127,10 +141,16 @@ except subprocess.TimeoutExpired as exc:
 sys.stdout.write(proc.stdout or "")
 sys.exit(proc.returncode)
 PY
-)
 gui_status=$?
 set -e
-printf '%s\n' "$gui_out"
+gui_out="$(cat /tmp/smoke-stdout.txt /tmp/admlog.txt 2>/dev/null || true)"
+# python wrote the captured pipe to our stdout already; admlog holds the banner.
+if [ -f /tmp/admlog.txt ]; then
+    note "--- /tmp/admlog.txt ---"
+    cat /tmp/admlog.txt
+    gui_out="${gui_out}
+$(cat /tmp/admlog.txt)"
+fi
 if [ "$gui_status" -ne 0 ]; then
     note "ERROR: GUI --help exited $gui_status"
     fail=1
