@@ -8,6 +8,8 @@ if [ -z "$APP" ] || [ ! -d "$APP" ]; then
     echo "Usage: $0 /path/to/Avidemux.app" >&2
     exit 2
 fi
+# Smoke tests run from /tmp, so a relative bundle path would not resolve.
+APP="$(cd "$(dirname "$APP")" && pwd)/$(basename "$APP")"
 
 fail=0
 macho=0
