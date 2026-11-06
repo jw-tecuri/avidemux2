@@ -54,13 +54,13 @@ jobs:
     timeout-minutes: 300
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           submodules: false
           fetch-depth: 1
 
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/Library/Caches/ccache
           key: ccache-avidemux-macos-arm64-${{ hashFiles('avidemux_core/**', 'avidemux/**', 'avidemux_plugins/**', 'bootStrapMacOS_Monterey.arm64.sh') }}
